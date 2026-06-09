@@ -89,6 +89,29 @@ def test_a2_raises_converge_and_tighten_value_bets():
     assert 0.0 < g.game_value() < 0.054
 
 
+def test_a2_donking_pays_and_is_polarized():
+    """Unlike AKQ (where OOP never donks), in the 13-rank A..2 game leading out
+    of position is PROFITABLE: allowing the donk strictly lowers IP's value
+    (OOP gains by leading), and the lead is polarized -- OOP donks a strong
+    non-nut hand (K) and a bottom bluff (2) while CHECKING the nuts (A) to trap
+    / check-raise, and checking the middle."""
+    deck = "AKQJT98765432"
+    g_off, _ = _solve(deck, 1.0, 1.0, 2, False, 1e-4, 200000)
+    g_on, avg = _solve(deck, 1.0, 1.0, 2, True, 1e-4, 250000)
+    from tree_solver import BET
+
+    # donking strictly helps OOP -> IP's value drops (gain ~0.0086; margin 0.003)
+    assert g_on.game_value() < g_off.game_value() - 3e-3
+    assert g_on.exploitability() < 2e-3
+
+    donk = {g_on.label_of[c]: avg.get((0, c, ()), {}).get(BET, 0.0)
+            for c in range(g_on.N)}
+    assert donk["K"] > 0.7                        # lead a strong non-nut for value
+    assert donk["K"] > donk["A"] + 0.3            # but slowplay/trap the nuts
+    assert donk["2"] > 0.3                        # lead the bottom as a bluff
+    assert donk["7"] < 0.1                        # the middle just checks
+
+
 def test_full_tree_is_an_equilibrium():
     """With donk + bet/raise/re-raise the average strategy is still an
     equilibrium: a best-response walk over the whole tree finds ~0 to exploit."""

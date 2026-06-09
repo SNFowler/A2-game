@@ -401,23 +401,32 @@ def main():
     # (3) the 13-rank A..2 deck -- validate the half street reduces correctly
     deck = "AKQJT98765432"
     report(TreeGame(deck, 1.0, 1.0, cap=1, allow_donk=False, explore=1e-4),
-           60000, "A..2 (13 ranks), NO donk, cap=1  ==  half-street A..2")
+           150000, "A..2 (13 ranks), NO donk, cap=1  ==  half-street A..2")
     print("Matches the half-street solver on the big deck: value ~ +0.0545, IP")
     print("value-bets A/K/Q, bluffs 2 (100%) and 3 (50%), OOP calls a top block.")
     print()
 
     # (4) A..2 with raises -- OOP can now check-raise (re-raises in the tree)
     report(TreeGame(deck, 1.0, 1.0, cap=2, allow_donk=False, explore=1e-4),
-           60000, "A..2 (13 ranks), NO donk, cap=2 (IP bets, OOP may RAISE)",
+           300000, "A..2 (13 ranks), NO donk, cap=2 (IP bets, OOP may RAISE)",
            max_len=2)
     print("Adding a raise changes the solution: value falls to ~ +0.0481 because")
     print("OOP can now CHECK-RAISE and fight back. IP value-bets tighten (Q drops")
-    print("out of the betting range -- it can no longer profitably face a raise),")
-    print("and the bet/raise sub-tree is solved to ~0 exploitability.")
+    print("out of the betting range -- it can no longer profitably face a raise).")
     print()
-    print("(Donk-on for A..2 converges much more slowly -- the opening lead")
-    print(" interacts with deep raise sub-trees -- so the donk demonstration is")
-    print(" left on the fast-converging AKQ game above.)")
+
+    # (5) A..2 with DONKS allowed -- does leading out of position pay here?
+    report(TreeGame(deck, 1.0, 1.0, cap=2, allow_donk=True, explore=1e-4),
+           300000, "A..2 (13 ranks), DONK ON, cap=2 (OOP may lead or check-raise)",
+           max_len=1)
+    print("Donking PAYS in A..2 (unlike AKQ): allowing OOP to lead drops IP's")
+    print("value from +0.0481 to ~ +0.0395 -- OOP gains ~ +0.0086/hand by leading.")
+    print("And it is a textbook POLARIZED lead: OOP donks K (~100%, value) and the")
+    print("bottom (2 ~70%, bluff) while CHECKING the nuts A (~95%, to trap and")
+    print("check-raise) and the whole middle. The 3-card AKQ game is simply too")
+    print("small to contain a profitable lead; the 13-rank game is not. (Same")
+    print("theme as thin value betting and natural exploitation: structure that")
+    print("only the larger game is rich enough to have.)")
 
 
 if __name__ == "__main__":

@@ -206,6 +206,39 @@ What the full AKQ tree reveals (`python tree_solver.py`):
   folds Q. The polar value/bluff/fold structure now plays out across multiple
   raise levels (`b → r → rr`).
 
+### The 13-rank A..2 deck on the full tree
+
+The same solver scales to the 13-card deck (the tree is pre-compiled once, so
+only the showdown comparison depends on the deal):
+
+| game | bet/raise | donk | value to IP | what changes |
+|------|-----------|------|-------------|--------------|
+| A..2 | cap=1 | off | **+0.0545** | reproduces the half-street A..2 exactly |
+| A..2 | cap=2 | off | **+0.0481** | OOP can **check-raise**; IP's value bets tighten — **Q drops out** of the betting range once it can be raised |
+| A..2 | cap=2 | **on** | **+0.0395** | OOP may **lead** — and it pays |
+
+Two findings the bigger deck unlocks that AKQ cannot show:
+
+- **Raises tighten value betting.** Once OOP can check-raise (`cap=2`), IP stops
+  betting its thin value (Q leaves the betting range): a hand that was a fine
+  half-street value bet can no longer profitably face a raise. The game value
+  falls from +0.0545 to +0.0481 as OOP gains a way to fight back.
+- **Donking pays in A..2 — but not in AKQ.** Letting OOP lead drops IP's value
+  from +0.0481 to **+0.0395**, so OOP gains **~+0.0086/hand by donking**. (It can
+  only ever *help* OOP — leading is an extra option — and here it strictly does.)
+  The lead is a textbook **polarized** range: OOP donks **K (~100%, value)** and
+  the **bottom (2 at ~70%, bluff)** while **checking the nuts A (~95%) to trap
+  and check-raise**, and checking the whole middle. The 3-card AKQ game is simply
+  too small to contain a profitable lead (there OOP donks 0% with every card);
+  the 13-rank game is rich enough that leading, with the nuts slowplayed behind
+  it, becomes correct.
+
+This is the same motif as thin value betting and natural exploitation elsewhere
+in this repo: *structure that only the larger game is rich enough to have.*
+
 The betting is fixed-limit with a single bet size; multiple/variable bet sizings
 are the natural next extension (the tree machinery already supports adding more
-actions per node).
+actions per node). Donk-on A..2 converges more slowly than the other cases (the
+opening lead interacts with the raise sub-trees) — `tree_solver.py`'s demo runs
+it to a low but non-zero exploitability; raise the iteration count for a sharper
+number.
