@@ -24,9 +24,11 @@ player's street contribution ``c``:
     showdown (contributions equal = c) : +-(pot/2 + c)   higher card wins
     fold                               : winner gets pot/2 + folder's contrib
 
-Solving is vanilla CFR (regret matching) sweeping every deal each iteration;
-average strategies converge to a Nash equilibrium and ``exploitability`` (an
-exact best-response walk over the tree) returns ~0 there.
+Solving is vanilla CFR (regret matching) sweeping every deal each iteration over
+a PRE-COMPILED game tree (built once; only the showdown winner depends on the
+deal, so the tree topology and terminal pots are cached). Average strategies
+converge to a Nash equilibrium and ``exploitability`` -- an exact best-response
+walk over the tree -- returns ~0 there.
 
 Sanity check: ``TreeGame(labels, pot, bet, cap=1, allow_donk=False)`` reproduces
 ``HalfStreetGame(labels, pot, bet)`` exactly (see test_tree_solver.py).
@@ -34,18 +36,11 @@ Sanity check: ``TreeGame(labels, pot, bet, cap=1, allow_donk=False)`` reproduces
 
 from __future__ import annotations
 
-
-def regret_match(regret, actions):
-    """Positive-part regret matching over ``actions``; uniform if all <= 0."""
-    pos = {a: (regret[a] if regret[a] > 0 else 0.0) for a in actions}
-    s = sum(pos.values())
-    if s > 0:
-        return {a: pos[a] / s for a in actions}
-    return {a: 1.0 / len(actions) for a in actions}
-
-
 # Action tokens
 CHECK, BET, CALL, FOLD, RAISE = "x", "b", "c", "f", "r"
+
+# Terminal kinds
+_FOLD, _SHOWDOWN = 0, 1
 
 
 class TreeGame:
@@ -78,10 +73,23 @@ class TreeGame:
                       for i in range(self.N) if o != i]
         self.w = 1.0 / len(self.deals)
 
-        self.regret = {}        # infoset -> {action: cumulative regret}
-        self.strat_sum = {}     # infoset -> {action: cumulative strategy}
+        # accumulators, keyed by the integer  idx = node_id * N + card
+        self.regret = {}
+        self.strat_sum = {}
 
-    # ---- tree mechanics --------------------------------------------------
+        # ---- pre-compile the game tree once (parallel arrays per node) -----
+        self._term = []         # is terminal?
+        self._par = []          # len(history) % 2  (which player's value a
+        #                          terminal returns; alternation parity)
+        self._player = []       # acting player (0=OOP, 1=IP); -1 if terminal
+        self._actions = []      # tuple of legal action tokens
+        self._children = []     # tuple of child node ids aligned to _actions
+        self._tkind = []        # terminal kind (_FOLD / _SHOWDOWN)
+        self._tamount = []      # _FOLD: signed net-to-OOP; _SHOWDOWN: magnitude
+        self._history = []      # betting history tuple (for read-out)
+        self.root = self._build(())
+
+    # ---- tree mechanics (used by the compiler, read-out and tests) -------
     def actions(self, history):
         """Legal actions at ``history`` (a tuple of tokens); () = OOP to open."""
         if not history:                                   # OOP opens
@@ -115,7 +123,8 @@ class TreeGame:
         return c
 
     def _payoff_oop(self, history, oop_card, ip_card):
-        """Terminal net chip swing to OOP (player 0)."""
+        """Terminal net chip swing to OOP (player 0). (Reference implementation;
+        the hot path uses the pre-compiled ``_tkind``/``_tamount``.)"""
         c = self._contribs(history)
         half = self.pot / 2.0
         if history[-1] == FOLD:
@@ -125,121 +134,197 @@ class TreeGame:
         amount = half + c[0]                               # showdown, c[0]==c[1]
         return amount if oop_card > ip_card else -amount
 
-    # ---- CFR -------------------------------------------------------------
-    def _strategy(self, infoset, actions):
-        rs = self.regret.get(infoset)
-        strat = regret_match(rs, actions) if rs else \
-            {a: 1.0 / len(actions) for a in actions}
+    def _build(self, history):
+        """Recursively compile ``history`` and its subtree; returns its node id.
+        Nodes are emitted post-order, so a node's id exceeds its children's."""
+        if self.is_terminal(history):
+            c = self._contribs(history)
+            half = self.pot / 2.0
+            if history[-1] == FOLD:
+                folder = (len(history) - 1) % 2
+                amt = half + c[folder]
+                kind, amount = _FOLD, (amt if folder == 1 else -amt)
+            else:
+                kind, amount = _SHOWDOWN, half + c[0]
+            return self._emit(history, True, -1, (), (), kind, amount)
+        acts = self.actions(history)
+        kids = tuple(self._build(history + (a,)) for a in acts)
+        return self._emit(history, False, len(history) % 2, acts, kids, -1, 0.0)
+
+    def _emit(self, history, term, player, acts, kids, kind, amount):
+        nid = len(self._term)
+        self._term.append(term)
+        self._par.append(len(history) % 2)
+        self._player.append(player)
+        self._actions.append(acts)
+        self._children.append(kids)
+        self._tkind.append(kind)
+        self._tamount.append(amount)
+        self._history.append(history)
+        return nid
+
+    # ---- CFR over the compiled tree --------------------------------------
+    def _strategy(self, idx, n):
+        """Current regret-matching strategy (list of ``n`` probs) at ``idx``."""
+        rs = self.regret.get(idx)
+        if rs is None:
+            strat = [1.0 / n] * n
+        else:
+            s, pos = 0.0, [0.0] * n
+            for j in range(n):
+                r = rs[j]
+                if r > 0.0:
+                    pos[j] = r
+                    s += r
+            strat = [p / s for p in pos] if s > 0.0 else [1.0 / n] * n
         if self.explore > 0.0:                             # blend toward uniform
-            u = 1.0 / len(actions)
-            strat = {a: (1 - self.explore) * strat[a] + self.explore * u
-                     for a in actions}
+            e, u = self.explore, 1.0 / n
+            strat = [(1 - e) * strat[j] + e * u for j in range(n)]
         return strat
 
-    def _cfr(self, history, oop, ip, p0, p1):
-        if self.is_terminal(history):
-            par = len(history) % 2
-            po = self._payoff_oop(history, oop, ip)
-            return po if par == 0 else -po                 # value to player `par`
-
-        player = len(history) % 2
-        card = oop if player == 0 else ip
-        infoset = (player, card, history)
-        actions = self.actions(history)
-        strat = self._strategy(infoset, actions)
-
-        util, node_util = {}, 0.0
-        for a in actions:
-            nh = history + (a,)
-            if player == 0:
-                u = -self._cfr(nh, oop, ip, p0 * strat[a], p1)
+    def _cfr(self, nid, oop, ip, p0, p1):
+        if self._term[nid]:
+            if self._tkind[nid] == _FOLD:
+                po = self._tamount[nid]
             else:
-                u = -self._cfr(nh, oop, ip, p0, p1 * strat[a])
-            util[a] = u
-            node_util += strat[a] * u
+                amt = self._tamount[nid]
+                po = amt if oop > ip else -amt
+            return po if self._par[nid] == 0 else -po      # value to player `par`
 
-        rs = self.regret.setdefault(infoset, {a: 0.0 for a in actions})
-        ss = self.strat_sum.setdefault(infoset, {a: 0.0 for a in actions})
-        cf = p1 if player == 0 else p0                     # counterfactual reach
-        own = p0 if player == 0 else p1
-        for a in actions:
-            rs[a] += cf * (util[a] - node_util)
-            ss[a] += own * strat[a]
+        player = self._player[nid]
+        card = oop if player == 0 else ip
+        acts = self._actions[nid]
+        kids = self._children[nid]
+        n = len(acts)
+        idx = nid * self.N + card
+        strat = self._strategy(idx, n)
+
+        util = [0.0] * n
+        node_util = 0.0
+        if player == 0:
+            for j in range(n):
+                u = -self._cfr(kids[j], oop, ip, p0 * strat[j], p1)
+                util[j] = u
+                node_util += strat[j] * u
+            cf, own = p1, p0
+        else:
+            for j in range(n):
+                u = -self._cfr(kids[j], oop, ip, p0, p1 * strat[j])
+                util[j] = u
+                node_util += strat[j] * u
+            cf, own = p0, p1
+
+        rs = self.regret.get(idx)
+        if rs is None:
+            rs = [0.0] * n
+            self.regret[idx] = rs
+            self.strat_sum[idx] = [0.0] * n
+        ss = self.strat_sum[idx]
+        for j in range(n):
+            rs[j] += cf * (util[j] - node_util)
+            ss[j] += own * strat[j]
         return node_util
 
     def train(self, iterations=20000):
+        root = self.root
         for _ in range(iterations):
             for (oop, ip) in self.deals:
-                self._cfr((), oop, ip, 1.0, 1.0)
+                self._cfr(root, oop, ip, 1.0, 1.0)
         return self.average_strategies()
 
     # ---- read-out --------------------------------------------------------
+    def _strat_table(self):
+        """``idx -> normalised average-strategy list`` (idx = nid*N + card)."""
+        tab = {}
+        for idx, ss in self.strat_sum.items():
+            s = sum(ss)
+            n = len(ss)
+            tab[idx] = [v / s for v in ss] if s > 0 else [1.0 / n] * n
+        return tab
+
     def average_strategies(self):
-        """``infoset -> {action: prob}`` from accumulated strategy sums."""
+        """``(player, card, history) -> {action: prob}`` from strategy sums."""
         out = {}
-        for infoset, ss in self.strat_sum.items():
-            s = sum(ss.values())
-            actions = self.actions(infoset[2])
-            out[infoset] = ({a: ss[a] / s for a in actions} if s > 0
-                            else {a: 1.0 / len(actions) for a in actions})
+        for idx, ss in self.strat_sum.items():
+            nid, card = divmod(idx, self.N)
+            acts = self._actions[nid]
+            player = self._player[nid]
+            hist = self._history[nid]
+            s = sum(ss)
+            probs = ({acts[j]: ss[j] / s for j in range(len(acts))} if s > 0
+                     else {a: 1.0 / len(acts) for a in acts})
+            out[(player, card, hist)] = probs
         return out
 
     def game_value(self):
         """EV to IP under the average strategies."""
-        avg = self.average_strategies()
+        tab = self._strat_table()
         tot = 0.0
         for (oop, ip) in self.deals:
-            tot += self.w * self._ev_oop(avg, (), oop, ip)
+            tot += self.w * self._ev_oop(tab, self.root, oop, ip)
         return -tot                                        # net to IP
 
-    def _ev_oop(self, avg, history, oop, ip):
-        if self.is_terminal(history):
-            return self._payoff_oop(history, oop, ip)
-        player = len(history) % 2
+    def _ev_oop(self, tab, nid, oop, ip):
+        if self._term[nid]:
+            if self._tkind[nid] == _FOLD:
+                return self._tamount[nid]
+            amt = self._tamount[nid]
+            return amt if oop > ip else -amt
+        player = self._player[nid]
         card = oop if player == 0 else ip
-        strat = avg.get((player, card, history)) or \
-            {a: 1.0 / len(self.actions(history)) for a in self.actions(history)}
-        return sum(p * self._ev_oop(avg, history + (a,), oop, ip)
-                   for a, p in strat.items())
+        kids = self._children[nid]
+        n = len(kids)
+        strat = tab.get(nid * self.N + card) or [1.0 / n] * n
+        return sum(strat[j] * self._ev_oop(tab, kids[j], oop, ip)
+                   for j in range(n))
 
     # ---- best response / exploitability ----------------------------------
-    def _best(self, avg, history, br, br_card, opp_reach):
+    def _best(self, tab, nid, br, br_card, opp_reach):
         """EV to best-responder ``br`` (0=OOP,1=IP) holding ``br_card``, summed
         over the opponent-card reach distribution ``opp_reach``."""
-        if self.is_terminal(history):
+        if self._term[nid]:
+            fold = self._tkind[nid] == _FOLD
+            amt = self._tamount[nid]
             s = 0.0
             for oc, pr in opp_reach.items():
                 if pr == 0.0:
                     continue
-                oop, ip = (br_card, oc) if br == 0 else (oc, br_card)
-                po = self._payoff_oop(history, oop, ip)
+                if fold:
+                    po = amt
+                else:
+                    oop, ip = (br_card, oc) if br == 0 else (oc, br_card)
+                    po = amt if oop > ip else -amt
                 s += pr * (po if br == 0 else -po)
             return s
-        player = len(history) % 2
-        actions = self.actions(history)
+        player = self._player[nid]
+        kids = self._children[nid]
+        n = len(kids)
         if player == br:                                   # best-responder maxes
-            return max(self._best(avg, history + (a,), br, br_card, opp_reach)
-                       for a in actions)
+            return max(self._best(tab, kids[j], br, br_card, opp_reach)
+                       for j in range(n))
         total = 0.0                                        # opponent: split reach
-        for a in actions:
+        for j in range(n):
             reach_a = {}
             for oc, pr in opp_reach.items():
                 if pr == 0.0:
                     continue
-                strat = avg.get((player, oc, history)) or \
-                    {x: 1.0 / len(actions) for x in actions}
-                reach_a[oc] = pr * strat[a]
-            total += self._best(avg, history + (a,), br, br_card, reach_a)
+                strat = tab.get(nid * self.N + oc)
+                pj = strat[j] if strat is not None else 1.0 / n
+                if pj != 0.0:
+                    reach_a[oc] = pr * pj
+            if reach_a:
+                total += self._best(tab, kids[j], br, br_card, reach_a)
         return total
 
     def best_response_value(self, br):
         """EV to player ``br`` when it best-responds to the average opponent."""
-        avg = self.average_strategies()
+        tab = self._strat_table()
+        inv = 1.0 / (self.N - 1)
         total = 0.0
         for br_card in range(self.N):
-            reach = {oc: 1.0 / (self.N - 1) for oc in range(self.N)
-                     if oc != br_card}
-            total += (1.0 / self.N) * self._best(avg, (), br, br_card, reach)
+            reach = {oc: inv for oc in range(self.N) if oc != br_card}
+            total += (1.0 / self.N) * self._best(tab, self.root, br, br_card,
+                                                 reach)
         return total
 
     def exploitability(self):
@@ -274,14 +359,15 @@ def print_tree(game, avg, max_len=None):
         print(f"      {_PLAYER[player]} {game.label_of[card]:>2}   {s}")
 
 
-def report(game, iterations, title):
+def report(game, iterations, title, max_len=None):
     avg = game.train(iterations)
     print("=" * 70)
     print(title)
     print(f"  pot={game.pot:g} bet={game.bet:g} cap={game.cap} "
-          f"donk={'on' if game.allow_donk else 'off'}")
+          f"donk={'on' if game.allow_donk else 'off'}  "
+          f"deck={''.join(game.labels_high_to_low)}")
     print("-" * 70)
-    print_tree(game, avg)
+    print_tree(game, avg, max_len=max_len)
     print("-" * 70)
     print(f"  value to IP  : {game.game_value():+.4f}")
     print(f"  exploitability: {game.exploitability():.2e}  (~0 = equilibrium)")
@@ -310,6 +396,28 @@ def main():
     print("    bluff-catcher (K) to the pot-sized bet; IP value-raises A,")
     print("    bluff-catches K, folds Q -- the polar value/bluff/fold structure")
     print("    now plays out across multiple raise levels.")
+    print()
+
+    # (3) the 13-rank A..2 deck -- validate the half street reduces correctly
+    deck = "AKQJT98765432"
+    report(TreeGame(deck, 1.0, 1.0, cap=1, allow_donk=False, explore=1e-4),
+           60000, "A..2 (13 ranks), NO donk, cap=1  ==  half-street A..2")
+    print("Matches the half-street solver on the big deck: value ~ +0.0545, IP")
+    print("value-bets A/K/Q, bluffs 2 (100%) and 3 (50%), OOP calls a top block.")
+    print()
+
+    # (4) A..2 with raises -- OOP can now check-raise (re-raises in the tree)
+    report(TreeGame(deck, 1.0, 1.0, cap=2, allow_donk=False, explore=1e-4),
+           60000, "A..2 (13 ranks), NO donk, cap=2 (IP bets, OOP may RAISE)",
+           max_len=2)
+    print("Adding a raise changes the solution: value falls to ~ +0.0481 because")
+    print("OOP can now CHECK-RAISE and fight back. IP value-bets tighten (Q drops")
+    print("out of the betting range -- it can no longer profitably face a raise),")
+    print("and the bet/raise sub-tree is solved to ~0 exploitability.")
+    print()
+    print("(Donk-on for A..2 converges much more slowly -- the opening lead")
+    print(" interacts with deep raise sub-trees -- so the donk demonstration is")
+    print(" left on the fast-converging AKQ game above.)")
 
 
 if __name__ == "__main__":

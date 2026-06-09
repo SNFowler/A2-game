@@ -53,6 +53,42 @@ def test_reduces_to_half_street():
     assert g.exploitability() < 5e-3
 
 
+def test_a2_reduces_to_half_street():
+    """The general solver extends to the 13-rank A..2 deck: cap=1 + no donk
+    reproduces the half-street A..2 solution -- value ~ +0.0545, IP value-bets
+    A/K/Q and bluffs the bottom (2 always, 3 at ~1/2)."""
+    deck = "AKQJT98765432"
+    g, _ = _solve(deck, 1.0, 1.0, 1, False, 1e-4, 50000)
+    avg = g.average_strategies()
+    ip = _ip_bet(avg, g)
+
+    ref = HalfStreetGame(deck, 1.0, 1.0)
+    ref.train(60000)
+
+    assert abs(g.game_value() - ref.game_value()) < 5e-3
+    assert g.exploitability() < 5e-3
+    for c in ("A", "K", "Q"):
+        assert ip[c] > 0.95                       # value-bet the top
+    assert ip["2"] > 0.9                          # always bluff the worst hand
+    assert abs(ip["3"] - 0.5) < 0.15              # half-bluff the next-worst
+    assert ip["7"] < 0.05                         # a middle card never bets
+
+
+def test_a2_raises_converge_and_tighten_value_bets():
+    """A..2 with a raise allowed (cap=2): OOP may check-raise. The solver still
+    converges (low exploitability), the positional edge shrinks (OOP can fight
+    back), and IP's value bets tighten -- Q drops out of the betting range."""
+    deck = "AKQJT98765432"
+    g, _ = _solve(deck, 1.0, 1.0, 2, False, 1e-4, 50000)
+    avg = g.average_strategies()
+    ip = _ip_bet(avg, g)
+    assert g.exploitability() < 5e-3
+    assert ip["A"] > 0.95 and ip["K"] > 0.95     # premium value bets remain
+    assert ip["Q"] < 0.2                          # thin value drops vs raises
+    # value is positive but below the half-street (raises let OOP fight back)
+    assert 0.0 < g.game_value() < 0.054
+
+
 def test_full_tree_is_an_equilibrium():
     """With donk + bet/raise/re-raise the average strategy is still an
     equilibrium: a best-response walk over the whole tree finds ~0 to exploit."""
