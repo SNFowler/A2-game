@@ -4,11 +4,13 @@ A small, dependency-free (pure-Python) CFR solver for the classic
 half-street "AKQ" poker toy game and its `A..2` (13-rank) generalisation.
 
 ```
-solver.py          # the CFR engine (HalfStreetGame) -- solves any deck
-run.py             # formatted report: AKQ, half-pot AKQ, A..2
-deviation_cost.py  # do equilibrium deviations cost EV? AKQ vs A-J vs A-2
-test_solver.py     # self-checks vs the closed-form solution
-VERIFICATION.md    # literature cross-check (Chen & Ankenman, GTO Wizard)
+solver.py                     # the CFR engine (HalfStreetGame) -- solves any deck
+run.py                        # formatted report: AKQ, half-pot AKQ, A..2
+deviation_cost.py             # do equilibrium deviations cost EV? AKQ vs A-J vs A-2
+natural_exploitation.py       # does a GTO player AUTO-punish a deviator? RPS / AKQ / A..2
+test_solver.py                # self-checks vs the closed-form solution
+test_natural_exploitation.py  # checks for the natural-exploitation demonstration
+VERIFICATION.md               # literature cross-check (Chen & Ankenman, GTO Wizard)
 ```
 
 ## The game
@@ -111,3 +113,54 @@ monotonically decreasing call frequency as its bluff-catcher weakens.
   returns an equivalent smeared mixture across J…4 worth the same total;
   `canonical_strategies()` re-packs it top-down.)
 - Game value to IP ≈ **+0.0545**, exploitability ≈ 8e-5.
+
+## Does a GTO player "naturally exploit" a deviator?
+
+`python natural_exploitation.py` answers a question players argue about: if
+your opponent deviates from equilibrium, does simply *playing GTO* (never
+adjusting) automatically win you extra EV?
+
+**The zero-sum lemma.** Hold your equilibrium strategy `σ*` fixed. Against any
+opponent `τ`, your EV is `≥ v` (the minimax guarantee), and it is **strictly**
+greater — i.e. GTO auto-profits — **iff `τ` ever plays an action that is not a
+best response to `σ*`** (a strictly-dominated action). So:
+
+> GTO naturally exploits a leak **⇔** the leak is a *strict* mistake against GTO.
+> Deviating at an **indifferent** decision is **free**: GTO banks nothing, and
+> you must *leave* GTO and best-respond to punish it (which re-opens you to
+> counter-exploitation).
+
+Whether the *strategically interesting* decisions are strict or indifferent is
+a property of the game, and it flips with size:
+
+| game | the strategic decisions | GTO auto-exploits a deviator? |
+|------|-------------------------|-------------------------------|
+| **Rock-paper-scissors** | every action ties the uniform mix — all indifferent | **No.** Uniform earns 0 vs "always Rock"; you must play "always Paper" (+1) to win. |
+| **AKQ** | bluff % and bluff-catch % — equilibrium makes both players *indifferent* (that is what "balanced" means) | **No.** A fixed GTO opponent gains ≈0 whether villain never bluffs or over-folds its bluff-catcher. |
+| **A..2 / real poker** | adds **thin value betting** (K, Q are *uniquely* best bets vs the bluff-catchers) — *strict* | **Yes.** A naive player who skips thin value is strictly dominated; GTO banks ≈ **+0.019/hand** with no adjustment. |
+
+The script reports, for each leak, the EV a **fixed** GTO opponent gains
+(`auto-profit`) versus the extra a **best-responder** would have collected
+(`best-resp leaves`, the money GTO leaves on the table):
+
+```
+A..2  (13 ranks)   GTO game value to IP = +0.0545
+  villain leak                          GTO auto-profit   best-resp leaves
+  OOP over-folds catchers (balanced)            -0.0001            +0.0930
+  IP never bluffs         (balanced)            +0.0064            +0.0609
+  IP skips THIN value     (strict)              +0.0192            +0.0768   <== NATURAL EXPLOITATION
+```
+
+**The honest nuance the numbers force:** even in A..2 (and real poker) the
+*purely balanced* decisions stay indifferent and are **never** auto-exploited —
+over-folding your bluff-catchers costs a fixed GTO bettor essentially **0**,
+because the bluff-catcher is made indifferent *by construction in every game*.
+Natural exploitation comes only from the **strict** decisions that big games
+add (thin value). The lone caveat: A..2's "never bluff" sits a hair above 0
+(+0.006) because the very worst hand (`2`) has zero showdown value and so
+*strictly* prefers to bluff — the single strict node in the bluffing structure.
+
+`deviation_cost.py` is the same fact seen from the deviator's side: the EV the
+deviator loses at a card equals the EV GTO gains there, and the per-card
+"action-EV gap" is exactly `0` at indifferent (free) decisions and non-zero at
+strict ones.
