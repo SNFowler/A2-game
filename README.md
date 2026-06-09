@@ -4,12 +4,14 @@ A small, dependency-free (pure-Python) CFR solver for the classic
 half-street "AKQ" poker toy game and its `A..2` (13-rank) generalisation.
 
 ```
-solver.py                     # the CFR engine (HalfStreetGame) -- solves any deck
+solver.py                     # half-street CFR engine (HalfStreetGame) -- solves any deck
+tree_solver.py                # GENERAL betting-tree CFR: donks, raises, re-raises (TreeGame)
 run.py                        # formatted report: AKQ, half-pot AKQ, A..2
 deviation_cost.py             # do equilibrium deviations cost EV? AKQ vs A-J vs A-2
 natural_exploitation.py       # does a GTO player AUTO-punish a deviator? RPS / AKQ / A..2
 test_solver.py                # self-checks vs the closed-form solution
 test_natural_exploitation.py  # checks for the natural-exploitation demonstration
+test_tree_solver.py           # checks the tree solver (incl. reducing to the half street)
 VERIFICATION.md               # literature cross-check (Chen & Ankenman, GTO Wizard)
 ```
 
@@ -164,3 +166,46 @@ add (thin value). The lone caveat: A..2's "never bluff" sits a hair above 0
 deviator loses at a card equals the EV GTO gains there, and the per-card
 "action-EV gap" is exactly `0` at indifferent (free) decisions and non-zero at
 strict ones.
+
+## Beyond the half street: donks, raises and re-raises
+
+`solver.py` hard-codes the *half street* — OOP is forced to check, then IP
+makes one bet/check decision and OOP one call/fold decision. `tree_solver.py`
+removes those assumptions and solves the **whole betting tree** with a generic
+extensive-form CFR:
+
+```python
+from tree_solver import TreeGame
+
+# OOP may lead (donk); fixed-limit bet/raise/re-raise up to cap=3 bets
+g = TreeGame("AKQ", pot=1.0, bet=1.0, cap=3, allow_donk=True, explore=1e-3)
+avg = g.train(120000)
+print(g.game_value(), g.exploitability())   # ~0 / ~0  => valid equilibrium
+```
+
+- **`allow_donk`** lets OOP open with a bet instead of being forced to check.
+- **`cap`** is the maximum number of bets+raises in a sequence (`cap=1` is a
+  single bet with no raises; the classic limit cap is 4). Betting is
+  fixed-limit: every bet and raise adds the same `bet` increment.
+- `exploitability()` is an exact best-response walk over the tree, so it is a
+  rigorous equilibrium check (not just a heuristic).
+
+It **generalises** the half-street solver rather than replacing it:
+`TreeGame(labels, pot, bet, cap=1, allow_donk=False)` reproduces
+`HalfStreetGame(labels, pot, bet)` exactly (same frequencies, same game value —
+checked in `test_tree_solver.py`).
+
+What the full AKQ tree reveals (`python tree_solver.py`):
+
+- **OOP never donks** — it opens ~0% with *every* card. Leading out of position
+  is dominated here: position is strictly valuable, so OOP checks and lets IP
+  act. The solver *discovers* this from regret minimisation; it is exactly the
+  assumption the half-street game bakes in by fiat.
+- **Facing a bet, OOP check-raises the nuts (A)** for value and folds its
+  bluff-catcher (K) to the pot-sized bet; IP value-raises A, bluff-catches K,
+  folds Q. The polar value/bluff/fold structure now plays out across multiple
+  raise levels (`b → r → rr`).
+
+The betting is fixed-limit with a single bet size; multiple/variable bet sizings
+are the natural next extension (the tree machinery already supports adding more
+actions per node).
